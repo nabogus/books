@@ -89,12 +89,19 @@ async function sessionId(k, name, email) {
   return Array.from(new Uint8Array(h), b => b.toString(16).padStart(2, "0")).join("");
 }
 const SESSION_STALE = 150000;  // a device not heard from for this long (ms) no longer holds the name
-const SESSION_BEAT = 60000;    // how often a device says it is still there, and looks whether another took its place
-// whose the name is now, for this device: "free" (nobody, released, or gone quiet), "mine", "busy" (another device)
+const SESSION_BEAT = 30000;    // how often a device says it is still there (and looks, should the live watch be down)
+// for a device coming in: whose the name is now. "free" (nobody, released, or gone quiet), "mine", "busy" (another
+// device, heard from lately: he is asked before it is put out). now: the database's clock, as near as the page knows.
 function sessionVerdict(rec, device, now) {
   if (!rec || typeof rec.d !== "string" || !rec.t) return "free";
   if (rec.d === device) return "mine";
   return now - rec.t > SESSION_STALE ? "free" : "busy";
+}
+// for a device that is in: has another one taken its place? However long ago, and whether or not that one is still
+// there: a device put out never takes the name back by itself (it did, when the other went quiet: a phone asleep
+// let the computer listen on, 2026-11-11). Coming back is a new login.
+function sessionLost(rec, device) {
+  return !!rec && typeof rec.d === "string" && rec.d !== device;
 }
 // -- the admin page (his own machine only)
 const NAME_LETTERS = "abcdefghjkmnpqrstuvwxyz23456789";  // no i l o 0 1: read aloud or typed from a chat without mistakes
@@ -119,7 +126,7 @@ function inviteText(url, u) {
 // ---- PURE-END
 if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pageOf, coverTone, partName, findVersion, nextRate,
   b64d, normId, openBox, userKey, unlock, contentKey, dayOf, expired, thaiDate, untilText, NAME_LETTERS, randomName, userProblem, inviteText,
-  sessionId, sessionVerdict, SESSION_STALE, SESSION_BEAT };
+  sessionId, sessionVerdict, sessionLost, SESSION_STALE, SESSION_BEAT };
 
 (function () {
   if (typeof document === "undefined") return;
@@ -456,7 +463,7 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
   const fetchUsers = () => fetch("users.json?t=" + Date.now(), { cache: "no-store" }).then(r => r.json());
   // "ok", or why not: "" nobody kept on this device, "revoked", "expired", "error" (no network, a broken file)
   // ---- one name, one device at a time (only when publish.js was given a sessions database: LOCKED.db)
-  const SES = { id: "", timer: 0, dev: "" };
+  const SES = { id: "", timer: 0, dev: "", es: null, skew: 0 };  // skew: the database's clock minus this device's
   let PENDING = null;  // who is waiting at "this name is in use on another device"
   function deviceId() {
     if (SES.dev) return SES.dev;
@@ -472,34 +479,56 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
   // t: the database's own clock (".sv"), or 0 to let the name go (leaving, closing the page)
   const sesPut = (release, keep) => fetch(sesUrl(), { method: "PUT", keepalive: !!keep,
     body: JSON.stringify({ d: deviceId(), t: release ? 0 : { ".sv": "timestamp" } }) })
-    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); });
+    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(j => { if (j && j.t) SES.skew = j.t - Date.now(); });  // what it wrote tells the database's clock
   // "busy" when another device holds the name now; else the name is taken for this device. The database out of
   // reach: he comes in all the same (his choice, 2026-11-11: a service being down must not lock his friends out).
   async function claim(a, force) {
     if (!LOCKED.db) return "ok";
     try {
       SES.id = await sessionId(a.k, a.name, a.email);
-      if (!force && sessionVerdict(await sesGet(), deviceId(), Date.now()) === "busy") return "busy";
+      if (!force && sessionVerdict(await sesGet(), deviceId(), Date.now() + SES.skew) === "busy") return "busy";
       await sesPut();
     } catch (e) { /* out of reach: no lock this time; the next beat tries again */ }
-    clearInterval(SES.timer);
-    SES.timer = setInterval(beat, SESSION_BEAT);
+    watch();
     return "ok";
   }
-  // still there, and still the one: another device that came in since puts this one out
+  // While he is in: the database tells this page at once when the record changes (a stream, EventSource), and a
+  // beat every SESSION_BEAT says "still here" and looks too, should the stream be down.
+  function watch() {
+    unwatch();
+    SES.timer = setInterval(beat, SESSION_BEAT);
+    if (window.EventSource) {
+      try {
+        SES.es = new EventSource(sesUrl());
+        SES.es.addEventListener("put", check);
+        SES.es.addEventListener("patch", check);
+      } catch (e) { SES.es = null; }
+    }
+  }
+  function unwatch() {
+    clearInterval(SES.timer);
+    if (SES.es) { SES.es.close(); SES.es = null; }
+  }
+  // is this device still the one? Another device in its place puts this one out, at once.
+  async function check() {
+    if (!KEY || !SES.id || !LOCKED || !LOCKED.db) return;
+    try { if (sessionLost(await sesGet(), deviceId())) kicked(); } catch (e) { /* out of reach: he keeps listening */ }
+  }
   async function beat() {
-    if (!KEY || !SES.id || !LOCKED.db) return;
+    if (!KEY || !SES.id || !LOCKED || !LOCKED.db) return;
     try {
-      if (sessionVerdict(await sesGet(), deviceId(), Date.now()) === "busy") return kicked();
+      if (sessionLost(await sesGet(), deviceId())) return kicked();
       await sesPut();
     } catch (e) { /* out of reach: he keeps listening */ }
   }
   function leave(keep) {
-    clearInterval(SES.timer);
+    unwatch();
     if (LOCKED && LOCKED.db && SES.id && KEY) sesPut(true, keep).catch(() => {});
   }
   function kicked() {
-    clearInterval(SES.timer);
+    if (!KEY) return;  // already out (the stream and a beat can both say so)
+    unwatch();
     const a = AUTH || {};
     stopReader();
     closeSheet();
