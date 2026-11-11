@@ -293,7 +293,7 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
       });
     }
     store.set("last", { id: v.id, key });
-    if (LOCKED) beat();  // a device another one replaced learns it here, before it listens on
+    if (LOCKED) check();  // a device another one replaced learns it here too, before it listens on
     au.addEventListener("play", onPlayState);
     au.addEventListener("pause", onPlayState);
     au.addEventListener("timeupdate", tick);
@@ -806,7 +806,7 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
     if (R && R.au.currentTime > 0 && !R.au.ended) savePos();
     leave(true);  // the page is closing: the name is free at once for his other device
   });
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) beat(); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
 
   // ---- routes: #/ the shelf, #/b/<id> a book's version, #/b/<id>/<key> a clip
   let shown = "";
@@ -818,6 +818,7 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
     stopReader();
     window.scrollTo(0, 0);
     if (LOCKED && !KEY) return showLogin("");
+    if (LOCKED) check();  // every page he opens: still the one device of this name?
     if (h[0] === "admin" && ADMIN) showAdmin();
     else if (h[0] === "b" && h[1] && h[2]) showReader(h[1], h[2]);
     else if (h[0] === "b" && h[1]) showBook(h[1]);
