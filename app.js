@@ -545,7 +545,7 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
   };
   function showAdmin(note) {
     document.title = "จัดการผู้ใช้";
-    const today = dayOf(new Date()), us = ADMIN.users, p = ADMIN.published;
+    const today = dayOf(new Date()), us = ADMIN.users, p = ADMIN.published, w = ADMIN.web || {};
     const rows = us.map((u, i) => {
       const out = expired(u.until, today);
       return `<div class="urow"><div><b class="mono">${esc(u.name)}</b> <span class="tag ${out ? "bad" : ""}">${out ? "หมดอายุแล้ว (" + thaiDate(u.until) + ")" : esc(untilText(u.until))}</span>
@@ -571,9 +571,13 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
         <p class="lead">${p ? `สร้างชุดเผยแพร่ล่าสุด ${esc(p.at)}: ผู้ใช้ ${p.users} คน ${p.clips} คลิป` : "ยังไม่เคยสร้างชุดเผยแพร่"}
           ${ADMIN.dirty ? '<br><b class="hot">มีการแก้ที่ยังไม่อยู่ในชุดเผยแพร่</b>' : ""}</p>
         <label>ที่อยู่เว็บสำหรับเพื่อน (ใส่ในข้อความเชิญ)<input id="uurl" value="${esc(ADMIN.url || "")}" placeholder="https://…" spellcheck="false"></label>
-        <div class="line"><button class="big" data-act="publish" type="button">สร้างชุดเผยแพร่</button>
-          <button class="pill warn" data-act="rotate" type="button">เปลี่ยนกุญแจทั้งชั้น</button></div>
-        <p class="lead" id="pnote">${esc(note || "ชุดเผยแพร่คือโฟลเดอร์ public ในเครื่องนี้ ข้อความและเสียงถูกเข้ารหัส ยังไม่ได้ส่งขึ้นเว็บ")}</p></section></div>`;
+        <div class="line"><button class="big" data-act="publish" type="button">① สร้างชุดเผยแพร่</button>
+          <button class="big" data-act="deploy" type="button" ${w.ready && p ? "" : "disabled"}>② ส่งขึ้นเว็บ</button></div>
+        <p class="lead">${!w.ready ? "ยังไม่ได้ตั้งที่เก็บของหน้าเว็บ ส่งขึ้นเว็บจากหน้านี้ยังไม่ได้"
+          : w.at ? `ส่งขึ้นเว็บล่าสุด ${esc(w.at)}` : "ยังไม่เคยส่งขึ้นเว็บจากหน้านี้"}
+          ${w.ready && w.pending ? '<br><b class="hot">ชุดเผยแพร่ล่าสุดยังไม่ได้ส่งขึ้นเว็บ</b>' : ""}</p>
+        <p class="lead" id="pnote">${esc(note || "กด ① เพื่อเข้ารหัสข้อความและเสียงไว้ในโฟลเดอร์ public ของเครื่องนี้ แล้วกด ② เพื่อส่งขึ้นเว็บ ผู้ใช้ที่เพิ่มหรือลบจะมีผลบนเว็บหลังกดทั้งสองปุ่ม")}</p>
+        <div class="line"><button class="pill warn" data-act="rotate" type="button">เปลี่ยนกุญแจทั้งชั้น</button></div></section></div>`;
     $("#umode").addEventListener("change", e => { $("#uuntil").hidden = !e.target.value; });
     $("#uurl").addEventListener("change", e => saveUsers(ADMIN.users, e.target.value.trim()));
   }
@@ -627,8 +631,17 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
         ADMIN = s;
         const r = s.result || {};
         showAdmin(`สร้างแล้ว: ผู้ใช้ ${r.users} คน${r.expired ? " (ตัดคนหมดอายุ " + r.expired + " คน)" : ""} ${r.clips} คลิป · เขียนไฟล์ใหม่ ${r.written} จาก ${r.files} ไฟล์`
-                  + (r.rotated ? " · เปลี่ยนกุญแจแล้ว" : "") + " · ยังอยู่ในเครื่อง ยังไม่ได้ส่งขึ้นเว็บ");
+                  + (r.rotated ? " · เปลี่ยนกุญแจแล้ว" : "") + " · ยังอยู่ในเครื่อง กด ② เพื่อส่งขึ้นเว็บ");
       }).catch(e => { b.disabled = false; $("#pnote").textContent = "สร้างไม่ได้: " + String(e.message || e); });
+    },
+    deploy(b) {
+      b.disabled = true;
+      $("#pnote").textContent = "กำลังส่งขึ้นเว็บ… (ครั้งที่มีเสียงใหม่ใช้เวลาหลายนาที อย่าปิดหน้านี้)";
+      api("deploy", {}).then(s => {
+        ADMIN = s;
+        showAdmin((s.result && s.result.changed ? "ส่งขึ้นเว็บแล้ว" : "เว็บตรงกับชุดเผยแพร่อยู่แล้ว ไม่มีอะไรต้องส่ง")
+                  + " · เว็บใช้เวลาราว 1 นาทีกว่าจะเปลี่ยนตาม");
+      }).catch(e => { b.disabled = false; $("#pnote").textContent = String(e.message || e); });
     },
     rotate(b) {
       if (confirm("เปลี่ยนกุญแจทั้งชั้น?\nไฟล์ทุกไฟล์ในชุดเผยแพร่จะถูกเข้ารหัสใหม่ ต้องอัปโหลดเสียงใหม่ทั้งหมด\nคนที่ถูกลบไปแล้วจะเปิดของเก่าไม่ได้อีก ส่วนผู้ใช้ที่ยังอยู่ในรายชื่อเข้าได้ตามเดิม")) ADMIN_ACTS.publish(b, true);
