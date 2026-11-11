@@ -199,6 +199,10 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1p
 @keyframes breathe { 50% { transform: scale(.8); opacity: .5; } }
 
 @media (min-width: 700px) {
+  /* on a wide screen a sheet is a dialog in the middle, not a drawer at the bottom edge (he found it too low) */
+  .sheet { top: 50%; bottom: auto; transform: translateY(-50%); max-width: 520px; border-radius: 20px;
+    padding: 20px 24px 22px; max-height: 80vh; max-height: 80dvh; box-shadow: 0 30px 60px -24px rgba(var(--shade), .6); }
+  .sheet::before { display: none; }
   .view { --pad: 44px; }
   .wrap { padding-top: 34px; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 34px 26px; }
