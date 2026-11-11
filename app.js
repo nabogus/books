@@ -82,6 +82,20 @@ function thaiDate(ymd) {
   return +m[3] + " " + ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."][+m[2] - 1] + " " + (+m[1] + 543);
 }
 function untilText(until) { return until ? "ใช้ได้ถึง " + thaiDate(until) : "ใช้ได้ตลอดไป"; }
+// -- one name, one device at a time: a small record {d: device, t: server time} in a database every device can reach
+// where this user's record is: only someone who opened his box (the key) and knows his name and e-mail can tell
+async function sessionId(k, name, email) {
+  const h = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("bs-session|" + k + "|" + normId(name) + "|" + normId(email)));
+  return Array.from(new Uint8Array(h), b => b.toString(16).padStart(2, "0")).join("");
+}
+const SESSION_STALE = 150000;  // a device not heard from for this long (ms) no longer holds the name
+const SESSION_BEAT = 60000;    // how often a device says it is still there, and looks whether another took its place
+// whose the name is now, for this device: "free" (nobody, released, or gone quiet), "mine", "busy" (another device)
+function sessionVerdict(rec, device, now) {
+  if (!rec || typeof rec.d !== "string" || !rec.t) return "free";
+  if (rec.d === device) return "mine";
+  return now - rec.t > SESSION_STALE ? "free" : "busy";
+}
 // -- the admin page (his own machine only)
 const NAME_LETTERS = "abcdefghjkmnpqrstuvwxyz23456789";  // no i l o 0 1: read aloud or typed from a chat without mistakes
 function randomName(n, pick) {
@@ -104,7 +118,8 @@ function inviteText(url, u) {
 }
 // ---- PURE-END
 if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pageOf, coverTone, partName, findVersion, nextRate,
-  b64d, normId, openBox, userKey, unlock, contentKey, dayOf, expired, thaiDate, untilText, NAME_LETTERS, randomName, userProblem, inviteText };
+  b64d, normId, openBox, userKey, unlock, contentKey, dayOf, expired, thaiDate, untilText, NAME_LETTERS, randomName, userProblem, inviteText,
+  sessionId, sessionVerdict, SESSION_STALE, SESSION_BEAT };
 
 (function () {
   if (typeof document === "undefined") return;
@@ -271,6 +286,7 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
       });
     }
     store.set("last", { id: v.id, key });
+    if (LOCKED) beat();  // a device another one replaced learns it here, before it listens on
     au.addEventListener("play", onPlayState);
     au.addEventListener("pause", onPlayState);
     au.addEventListener("timeupdate", tick);
@@ -439,7 +455,69 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
   }
   const fetchUsers = () => fetch("users.json?t=" + Date.now(), { cache: "no-store" }).then(r => r.json());
   // "ok", or why not: "" nobody kept on this device, "revoked", "expired", "error" (no network, a broken file)
-  async function enter(a, users) {
+  // ---- one name, one device at a time (only when publish.js was given a sessions database: LOCKED.db)
+  const SES = { id: "", timer: 0, dev: "" };
+  let PENDING = null;  // who is waiting at "this name is in use on another device"
+  function deviceId() {
+    if (SES.dev) return SES.dev;
+    let d = store.get("dev");
+    if (!/^[0-9a-f]{32}$/.test(d || "")) {
+      d = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+      store.set("dev", d);
+    }
+    return (SES.dev = d);
+  }
+  const sesUrl = () => LOCKED.db.replace(/\/+$/, "") + "/s/" + SES.id + ".json";
+  const sesGet = () => fetch(sesUrl(), { cache: "no-store" }).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); });
+  // t: the database's own clock (".sv"), or 0 to let the name go (leaving, closing the page)
+  const sesPut = (release, keep) => fetch(sesUrl(), { method: "PUT", keepalive: !!keep,
+    body: JSON.stringify({ d: deviceId(), t: release ? 0 : { ".sv": "timestamp" } }) })
+    .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); });
+  // "busy" when another device holds the name now; else the name is taken for this device. The database out of
+  // reach: he comes in all the same (his choice, 2026-11-11: a service being down must not lock his friends out).
+  async function claim(a, force) {
+    if (!LOCKED.db) return "ok";
+    try {
+      SES.id = await sessionId(a.k, a.name, a.email);
+      if (!force && sessionVerdict(await sesGet(), deviceId(), Date.now()) === "busy") return "busy";
+      await sesPut();
+    } catch (e) { /* out of reach: no lock this time; the next beat tries again */ }
+    clearInterval(SES.timer);
+    SES.timer = setInterval(beat, SESSION_BEAT);
+    return "ok";
+  }
+  // still there, and still the one: another device that came in since puts this one out
+  async function beat() {
+    if (!KEY || !SES.id || !LOCKED.db) return;
+    try {
+      if (sessionVerdict(await sesGet(), deviceId(), Date.now()) === "busy") return kicked();
+      await sesPut();
+    } catch (e) { /* out of reach: he keeps listening */ }
+  }
+  function leave(keep) {
+    clearInterval(SES.timer);
+    if (LOCKED && LOCKED.db && SES.id && KEY) sesPut(true, keep).catch(() => {});
+  }
+  function kicked() {
+    clearInterval(SES.timer);
+    const a = AUTH || {};
+    stopReader();
+    closeSheet();
+    KEY = AUTH = null;
+    SHELF = { books: [], built: "0" };
+    store.set("auth", { name: a.name, email: a.email });  // the key is not kept: coming back is a new login
+    showLogin("kicked");
+  }
+  function showBusy() {
+    app.innerHTML = `<div class="gate"><div class="gatecard">
+      <div class="emblem">${cover("ชั้นหนังสือเสียง")}</div>
+      <h1>ชื่อนี้กำลังใช้อยู่ที่อีกเครื่อง</h1>
+      <p>หนึ่งชื่อผู้ใช้ฟังได้ทีละเครื่อง ถ้าเข้าต่อ เครื่องนั้นจะออกจากระบบ</p>
+      <button class="big" data-act="takeover" type="button">เข้าต่อที่เครื่องนี้</button>
+      <button class="pill" data-act="cancelbusy" type="button">ยกเลิก</button></div>${themeBtn()}</div>`;
+  }
+
+  async function enter(a, users, force) {
     try {
       if (!a || !a.name || !a.email) return "";
       if (!a.k || a.kid !== LOCKED.kid || a.ub !== LOCKED.ub) {  // the list or the key changed: is he still on it
@@ -455,6 +533,11 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
         store.set("auth", { name: a.name, email: a.email });  // past his day: the key is not kept either
         return "expired";
       }
+      if ((await claim(a, force)) === "busy") {  // nothing is opened, nothing kept, until he says "go on here"
+        PENDING = a;
+        return "busy";
+      }
+      PENDING = null;
       KEY = await contentKey(a.k);
       SHELF = JSON.parse(new TextDecoder().decode(await fetchBox("data/shelf.enc?t=" + Date.now())));
       AUTH = a;
@@ -462,8 +545,10 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
       return "ok";
     } catch (e) { return "error"; }
   }
+  // after a login or a return to the page: the shelf, the "in use elsewhere" question, or the login with the reason
+  const after = res => (res === "ok" ? route() : res === "busy" ? showBusy() : showLogin(res));
   const WHY = { revoked: "ชื่อผู้ใช้นี้ใช้ไม่ได้แล้ว ติดต่อเจ้าของชั้นหนังสือ", error: "เปิดชั้นหนังสือไม่ได้ ตรวจอินเทอร์เน็ตแล้วลองอีกครั้ง",
-                wrong: "ชื่อผู้ใช้หรืออีเมลไม่ถูก" };
+                wrong: "ชื่อผู้ใช้หรืออีเมลไม่ถูก", kicked: "มีการเข้าใช้ชื่อนี้จากอีกเครื่อง เครื่องนี้จึงออกจากระบบ" };
   function showLogin(why) {
     document.title = "ชั้นหนังสือเสียง";
     const a = store.get("auth") || {};
@@ -487,8 +572,7 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
         res = await enter({ name: $("#lname").value, email: $("#lemail").value }, users);
         if (res === "revoked") res = "wrong";
       } catch (err) { res = "error"; }
-      if (res === "ok") return route();
-      showLogin(res);
+      after(res);
     });
   }
   function accountSheet() {
@@ -498,6 +582,7 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
       <div class="row"><span>ออกจากเครื่องนี้</span><button class="pill" data-act="logout">ออกจากระบบ</button></div>`);
   }
   function logout() {
+    leave();
     store.set("auth", null);
     KEY = AUTH = null;
     SHELF = { books: [], built: "0" };
@@ -575,7 +660,8 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
           <button class="big" data-act="deploy" type="button" ${w.ready && p ? "" : "disabled"}>② ส่งขึ้นเว็บ</button></div>
         <p class="lead">${!w.ready ? "ยังไม่ได้ตั้งที่เก็บของหน้าเว็บ ส่งขึ้นเว็บจากหน้านี้ยังไม่ได้"
           : w.at ? `ส่งขึ้นเว็บล่าสุด ${esc(w.at)}` : "ยังไม่เคยส่งขึ้นเว็บจากหน้านี้"}
-          ${w.ready && w.pending ? '<br><b class="hot">ชุดเผยแพร่ล่าสุดยังไม่ได้ส่งขึ้นเว็บ</b>' : ""}</p>
+          ${w.ready && w.pending ? '<br><b class="hot">ชุดเผยแพร่ล่าสุดยังไม่ได้ส่งขึ้นเว็บ</b>' : ""}
+          <br>หนึ่งชื่อฟังได้ทีละเครื่อง: ${w.sessions ? "เปิดอยู่" : "ยังไม่ได้เปิด"}</p>
         <p class="lead" id="pnote">${esc(note || "กด ① เพื่อเข้ารหัสข้อความและเสียงไว้ในโฟลเดอร์ public ของเครื่องนี้ แล้วกด ② เพื่อส่งขึ้นเว็บ ผู้ใช้ที่เพิ่มหรือลบจะมีผลบนเว็บหลังกดทั้งสองปุ่ม")}</p>
         <div class="line"><button class="pill warn" data-act="rotate" type="button">เปลี่ยนกุญแจทั้งชั้น</button></div></section></div>`;
     $("#umode").addEventListener("change", e => { $("#uuntil").hidden = !e.target.value; });
@@ -659,6 +745,8 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
     if (act === "size") { S.size = Math.max(16, Math.min(30, S.size + +b.dataset.d)); applySettings(); settingsSheet(); return paginate(); }
     if (act === "account") return accountSheet();
     if (act === "logout") return logout();
+    if (act === "takeover") { b.disabled = true; return PENDING ? enter(PENDING, null, true).then(after) : showLogin(""); }
+    if (act === "cancelbusy") { PENDING = null; return showLogin(""); }
     if (ADMIN_ACTS[act]) return ADMIN_ACTS[act](b);
     if (!R) return;
     if (act === "play") {
@@ -685,7 +773,11 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
   });
   let rz = 0;
   window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(paginate, 150); });
-  window.addEventListener("pagehide", () => { if (R && R.au.currentTime > 0 && !R.au.ended) savePos(); });
+  window.addEventListener("pagehide", () => {
+    if (R && R.au.currentTime > 0 && !R.au.ended) savePos();
+    leave(true);  // the page is closing: the name is free at once for his other device
+  });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) beat(); });
 
   // ---- routes: #/ the shelf, #/b/<id> a book's version, #/b/<id>/<key> a clip
   let shown = "";
@@ -706,7 +798,7 @@ if (typeof module !== "undefined") module.exports = { clock, longTime, segAt, pa
   applySettings();
   if (LOCKED) {
     app.innerHTML = '<div class="gate"><p class="wait">กำลังเปิดชั้นหนังสือ…</p></div>';
-    enter(store.get("auth")).then(res => (res === "ok" ? route() : showLogin(res)));
+    enter(store.get("auth")).then(after);
   } else {
     route();
     if (/^https?:$/.test(location.protocol)) {  // served by serve.py on his own machine: the gear
