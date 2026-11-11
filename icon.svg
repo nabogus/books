@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- the shelf's icon: a cloth-bound book in the cover's red, a play mark on it (an audio book). Drawn for this
+       project; make_icons.py draws the same shapes as PNG for browsers and phones that want one. -->
+  <rect x="11" y="5" width="42" height="54" rx="5" fill="#7a2e2e"/>
+  <path d="M16 5h3v54h-3a5 5 0 0 1-5-5V10a5 5 0 0 1 5-5z" fill="#5a2020"/>
+  <rect x="23.5" y="10.5" width="24" height="43" rx="2" fill="none" stroke="#f3e3c8" stroke-opacity=".6" stroke-width="1.5"/>
+  <path d="M30.5 24.5v15l12.5-7.5z" fill="#f6e7cd"/>
+</svg>
